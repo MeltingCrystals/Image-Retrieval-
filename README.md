@@ -11,5 +11,5 @@ A Python-based image retrieval system using CLIP embeddings and Milvus vector da
 
 1. Clone the repository:
 ```bash
-git clone [your-repo-url]
+git clone https://github.com/lenusic/Image-Retrieval-.git
 cd ImageRetrieval
