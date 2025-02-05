@@ -1,5 +1,5 @@
 from pathlib import Path
-from src.app_pipeline import ImageSearchApp
+from app_pipeline import ImageSearchApp
 
 
 def main():
