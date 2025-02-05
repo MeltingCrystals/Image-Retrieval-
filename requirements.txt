@@ -1,0 +1,7 @@
+torch
+torchvision
+ftfy
+regex
+tqdm
+Pillow
+transformers
