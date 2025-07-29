@@ -5,3 +5,7 @@ regex
 tqdm
 Pillow
 transformers
+pymilvus
+scikit-learn
+matplotlib
+seaborn

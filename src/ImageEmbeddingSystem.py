@@ -1,138 +1,215 @@
+# ImageEmbeddingSystem.py
+"""Module for generating and storing image embeddings in Milvus."""
+
+import logging
+from pathlib import Path
+from typing import List, Tuple, Optional, Dict
+import numpy as np
 import torch
 from PIL import Image
+from pymilvus import connections, Collection, FieldSchema, CollectionSchema, DataType, utility
 from transformers import CLIPProcessor, CLIPModel
-from pymilvus import connections, Collection, FieldSchema, CollectionSchema, DataType
-import numpy as np
-from pathlib import Path
-from typing import List
+from tqdm import tqdm
+from config import MILVUS_HOST, MILVUS_PORT, EMBEDDING_DIM, BATCH_SIZE
+
+logger = logging.getLogger(__name__)
 
 
 class ImageEmbeddingSystem:
-    def __init__(self):
-        # Initialize CLIP model
-        self.model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-        self.processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model.to(self.device)
+    """Handles image embedding generation and storage in Milvus."""
 
-        # Connect to Milvus
+    def __init__(self, model: CLIPModel, processor: CLIPProcessor, device: str):
+        """
+        Initializes the ImageEmbeddingSystem.
+
+        Args:
+            model: The CLIP model instance.
+            processor: The CLIP processor instance.
+            device: The device to use ('cuda' or 'cpu').
+        """
+        self.model = model
+        self.processor = processor
+        self.device = device
         self.setup_milvus()
 
     def setup_milvus(self):
+        """Sets up the Milvus connection and collection."""
         try:
-            # Connect to Milvus server
-            connections.connect(host='localhost', port='19530')
+            connections.connect(host=MILVUS_HOST, port=MILVUS_PORT)
+            logger.info("Connected to Milvus server.")
 
-            # Define collection schema
-            dim = 512  # CLIP embedding dimension
             fields = [
                 FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
                 FieldSchema(name="image_path", dtype=DataType.VARCHAR, max_length=500),
-                FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=dim)
+                FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=EMBEDDING_DIM),
+                # Add field to store the original unnormalized embedding magnitude
+                FieldSchema(name="magnitude", dtype=DataType.FLOAT)
             ]
-            schema = CollectionSchema(fields=fields, description="image_embeddings")
+            schema = CollectionSchema(fields=fields, description="Image embeddings collection")
+            collection_name = "image_embeddings"
 
-            # Create collection
-            self.collection = Collection(name="image_embeddings", schema=schema)
-
-            # Create index
-            index_params = {
-                "metric_type": "COSINE",
-                "index_type": "IVF_FLAT",
-                "params": {"nlist": 1024}
-            }
-            self.collection.create_index(field_name="embedding", index_params=index_params)
+            if utility.has_collection(collection_name):
+                logger.info(f"Collection '{collection_name}' already exists.")
+                self.collection = Collection(collection_name)
+            else:
+                self.collection = Collection(name=collection_name, schema=schema)
+                index_params = {
+                    "metric_type": "COSINE",
+                    "index_type": "IVF_FLAT",
+                    "params": {"nlist": 1024}
+                }
+                self.collection.create_index(field_name="embedding", index_params=index_params)
+                logger.info(f"Created new collection '{collection_name}' with index.")
 
         except Exception as e:
-            raise ConnectionError(f"Failed to connect to Milvus: {e}")
+            logger.error(f"Failed to set up Milvus: {e}")
+            raise
 
-    def generate_embedding(self, image_path: Path) -> np.ndarray:
+    def generate_embedding(self, image_path: Path) -> Tuple[np.ndarray, float]:
+        """
+        Generates an embedding for an image and returns both normalized embedding and magnitude.
+
+        Args:
+            image_path: Path to the image file.
+
+        Returns:
+            Tuple of (normalized_embedding, magnitude)
+
+        Raises:
+            Exception: If embedding generation fails.
+        """
         try:
-            # Load and preprocess image
             with Image.open(image_path) as image:
                 inputs = self.processor(images=image, return_tensors="pt").to(self.device)
-
-            # Generate embedding
             with torch.no_grad():
                 image_features = self.model.get_image_features(**inputs)
 
-            # Convert to numpy and normalize
+            # Get unnormalized embedding
             embedding = image_features.cpu().numpy()[0]
-            embedding = embedding / np.linalg.norm(embedding)
-            return embedding
+
+            # Calculate magnitude (L2 norm)
+            magnitude = float(np.linalg.norm(embedding))
+
+            # Return normalized embedding and its magnitude
+            return embedding / magnitude, magnitude
 
         except Exception as e:
-            raise ValueError(f"Failed to generate embedding for {image_path}: {e}")
+            logger.error(f"Failed to generate embedding for {image_path}: {e}")
+            raise
 
-    def check_milvus_entries(self):
-        """Check and display information about stored embeddings"""
-        try:
-            # Get collection info
-            self.collection.load()
-            entity_count = self.collection.num_entities
+    def process_and_store_images(self, image_paths: List[Path]) -> Tuple[int, int]:
+        """
+        Processes images in batches and stores their embeddings in Milvus.
 
-            print(f"Total number of stored embeddings: {entity_count}")
+        Args:
+            image_paths: List of image file paths.
 
-            if entity_count > 0:
-                # Retrieve some samples to verify content
-                results = self.collection.query(
-                    expr="id >= 0",
-                    output_fields=["id", "image_path"],
-                    limit=5  # Show first 5 entries as sample
-                )
-
-                print("\nSample entries:")
-                for entry in results:
-                    print(f"ID: {entry['id']}, Path: {entry['image_path']}")
-
-                # Verify if embeddings exist
-                sample = self.collection.query(
-                    expr="id >= 0",
-                    output_fields=["embedding"],
-                    limit=1
-                )
-                if sample and len(sample[0]['embedding']) == 512:  # CLIP dimension
-                    print("\nEmbeddings verified: ✓ (correct dimension of 512)")
-                else:
-                    print("\nWarning: Embeddings may not be stored correctly")
-
-        except Exception as e:
-            print(f"Error checking Milvus entries: {e}")
-        finally:
-            self.collection.release()  # Release collection from memory
-
-
-    def process_and_store_images(self, image_paths: List[Path]):
+        Returns:
+            Tuple of (successful_count, failed_count)
+        """
         if not image_paths:
-            raise ValueError("No image paths provided")
+            logger.warning("No image paths provided for processing.")
+            return 0, 0
 
-        # Prepare data for batch insertion
-        embeddings = []
+        normalized_embeddings = []
+        magnitudes = []
         paths = []
+        failed_count = 0
 
-        # Process images in batches
-        batch_size = 100  # Adjust based on your system's capacity
+        # Process images with progress bar
+        for image_path in tqdm(image_paths, desc="Generating embeddings"):
+            try:
+                normalized_embedding, magnitude = self.generate_embedding(image_path)
+                normalized_embeddings.append(normalized_embedding)
+                magnitudes.append(magnitude)
+                paths.append(str(image_path))
+            except Exception as e:
+                logger.warning(f"Skipping {image_path} due to error: {e}")
+                failed_count += 1
+                continue
 
-        for i in range(0, len(image_paths), batch_size):
-            batch_paths = image_paths[i:i + batch_size]
+        successful_count = len(paths)
 
-            for image_path in batch_paths:
-                try:
-                    embedding = self.generate_embedding(image_path)
-                    embeddings.append(embedding)
-                    paths.append(str(image_path))
-                except Exception as e:
-                    print(f"Error processing {image_path}: {e}")
-                    continue
+        if normalized_embeddings and paths:
+            try:
+                # Now we store both normalized embeddings and magnitudes
+                self.collection.insert([paths, normalized_embeddings, magnitudes])
+                self.collection.flush()
+                logger.info(f"Inserted batch of {len(paths)} images into Milvus.")
+            except Exception as e:
+                logger.error(f"Error inserting batch into Milvus: {e}")
+                # If the entire batch failed, count all as failures
+                failed_count += successful_count
+                successful_count = 0
 
-            # Insert batch into Milvus
-            if embeddings and paths:
-                try:
-                    self.collection.insert([paths, embeddings])
-                    self.collection.flush()
-                    print(f"Successfully processed batch of {len(paths)} images")
-                    embeddings = []
-                    paths = []
-                except Exception as e:
-                    print(f"Error inserting batch into Milvus: {e}")
+        return successful_count, failed_count
 
+    def get_embeddings(self, limit: int = 1000) -> List[Tuple[str, np.ndarray]]:
+        """
+        Retrieves normalized embeddings and image paths from Milvus.
+
+        Args:
+            limit: Maximum number of embeddings to retrieve.
+
+        Returns:
+            List of tuples (image_path, normalized_embedding).
+        """
+        try:
+            self.collection.load()
+            results = self.collection.query(
+                expr="id >= 0",
+                output_fields=["image_path", "embedding"],
+                limit=limit
+            )
+            embeddings = [(entry["image_path"], np.array(entry["embedding"])) for entry in results]
+            logger.info(f"Retrieved {len(embeddings)} embeddings from Milvus.")
+            return embeddings
+        except Exception as e:
+            logger.error(f"Error retrieving embeddings from Milvus: {e}")
+            raise
+        finally:
+            self.collection.release()
+
+    def get_embeddings_with_magnitude(self, limit: int = 1000) -> List[Tuple[str, np.ndarray, float]]:
+        """
+        Retrieves normalized embeddings, magnitudes, and image paths from Milvus.
+
+        Args:
+            limit: Maximum number of embeddings to retrieve.
+
+        Returns:
+            List of tuples (image_path, normalized_embedding, magnitude).
+        """
+        try:
+            self.collection.load()
+            results = self.collection.query(
+                expr="id >= 0",
+                output_fields=["image_path", "embedding", "magnitude"],
+                limit=limit
+            )
+            embeddings = [
+                (entry["image_path"],
+                 np.array(entry["embedding"]),
+                 entry.get("magnitude", 1.0))  # Default to 1.0 if magnitude not available
+                for entry in results
+            ]
+            logger.info(f"Retrieved {len(embeddings)} embeddings with magnitudes from Milvus.")
+            return embeddings
+        except Exception as e:
+            logger.error(f"Error retrieving embeddings with magnitudes from Milvus: {e}")
+            raise
+        finally:
+            self.collection.release()
+
+    def reconstruct_original_embeddings(self, embeddings: List[Tuple[str, np.ndarray, float]]) -> List[
+        Tuple[str, np.ndarray]]:
+        """
+        Reconstructs original unnormalized embeddings from normalized embeddings and magnitudes.
+
+        Args:
+            embeddings: List of tuples (image_path, normalized_embedding, magnitude).
+
+        Returns:
+            List of tuples (image_path, unnormalized_embedding).
+        """
+        return [(path, emb * mag) for path, emb, mag in embeddings]

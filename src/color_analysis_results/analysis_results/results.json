@@ -1,0 +1,23 @@
+{
+  "general_mi": {
+    "cosine_distance": 0.04285153559885185,
+    "l1_distance": 0.048362972476639614,
+    "l2_distance": 0.049682921503082816,
+    "linf_distance": 0.020402982565150805,
+    "magnitude_difference": 0.0036587826277689342
+  },
+  "color_mi": {
+    "cosine_distance": 0.016957414062767687,
+    "l1_distance": 0.00850139078061836,
+    "l2_distance": 0.01396383293412597,
+    "linf_distance": 0.00795827218697395,
+    "magnitude_difference": 0.012949529157787586
+  },
+  "optimal_weights": {
+    "w_angle": 1.0,
+    "w_l1": 1.0,
+    "w_l2": 1.0,
+    "w_inf": 0.0,
+    "w_mag": 0.5
+  }
+}
